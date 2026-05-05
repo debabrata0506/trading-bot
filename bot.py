@@ -8,8 +8,10 @@ from datetime import datetime
 
 app = Flask(__name__)
 
+# ================= COINS =================
 PAIRS = ["B-BTC_USDT","B-ETH_USDT","B-SUI_USDT","B-DOGE_USDT"]
 
+# ================= MODELS =================
 model1 = SGDClassifier(loss="log_loss")
 model2 = LogisticRegression(max_iter=100)
 scaler = StandardScaler()
@@ -27,6 +29,7 @@ MODEL_FILE = "model.pkl"
 TRADE_LOG = "trade_log.csv"
 last_sent = {}
 
+# ================= TELEGRAM =================
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -42,7 +45,7 @@ def send_telegram(msg):
 # ================= DATA =================
 def get_data(pair):
     url = "https://public.coindcx.com/market_data/candles"
-    params = {"pair": pair, "interval":"5m","limit":80}
+    params = {"pair": pair, "interval":"5m","limit":60}
     df = pd.DataFrame(requests.get(url, params=params).json())
     df.columns = [c.lower() for c in df.columns]
     df["close"] = pd.to_numeric(df["close"])
@@ -150,10 +153,11 @@ def load_model():
 # ================= BOT =================
 def run():
     load_model()
-
     last_report = datetime.now().day
 
     while True:
+        print(f"BOT RUNNING | {time.strftime('%H:%M:%S')} | Balance: {round(balance,2)}")
+
         for pair in PAIRS:
             try:
                 df = get_data(pair)
@@ -183,7 +187,7 @@ def run():
             except Exception as e:
                 print("Error:", e)
 
-        # daily summary
+        # Daily report
         today = datetime.now().day
         if today != last_report:
             total = wins + losses
@@ -196,7 +200,7 @@ def run():
             last_report = today
 
         save_model()
-        time.sleep(120)
+        time.sleep(150)
 
 # ================= ROUTES =================
 @app.route("/")
@@ -224,7 +228,7 @@ def chart():
     if not equity:
         return "No data yet"
 
-    plt.figure(figsize=(8,4))
+    plt.figure(figsize=(6,3))
     plt.plot(equity)
     plt.title("Equity Curve")
     plt.savefig("chart.png")
