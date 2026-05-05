@@ -115,6 +115,7 @@ def home():
     return render_template_string(HTML, signals=signals, balance=balance, equity=equity)
 
 import threading
-threading.Thread(target=run).start()
+
+threading.Thread(target=run, daemon=True).start()
 
 app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)))
