@@ -4,20 +4,14 @@ from sklearn.linear_model import SGDClassifier, LogisticRegression
 from sklearn.preprocessing import StandardScaler
 import joblib
 import matplotlib.pyplot as plt
+from datetime import datetime
 
 app = Flask(__name__)
 
-# ================= COINS =================
-PAIRS = [
-    "B-BTC_USDT",
-    "B-ETH_USDT",
-    "B-SUI_USDT",
-    "B-DOGE_USDT"
-]
+PAIRS = ["B-BTC_USDT","B-ETH_USDT","B-SUI_USDT","B-DOGE_USDT"]
 
-# ================= MODELS =================
 model1 = SGDClassifier(loss="log_loss")
-model2 = LogisticRegression()
+model2 = LogisticRegression(max_iter=100)
 scaler = StandardScaler()
 
 model_ready = False
@@ -26,9 +20,13 @@ signals = []
 equity = []
 balance = 1000
 
-MODEL_FILE = "model.pkl"
+wins = 0
+losses = 0
 
-# ================= TELEGRAM =================
+MODEL_FILE = "model.pkl"
+TRADE_LOG = "trade_log.csv"
+last_sent = {}
+
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -44,7 +42,7 @@ def send_telegram(msg):
 # ================= DATA =================
 def get_data(pair):
     url = "https://public.coindcx.com/market_data/candles"
-    params = {"pair": pair, "interval":"5m","limit":100}
+    params = {"pair": pair, "interval":"5m","limit":80}
     df = pd.DataFrame(requests.get(url, params=params).json())
     df.columns = [c.lower() for c in df.columns]
     df["close"] = pd.to_numeric(df["close"])
@@ -64,7 +62,9 @@ def train(df):
     X = df[["ret","ema"]]
     y = df["y"]
 
-    scaler.fit(X)
+    if not model_ready:
+        scaler.fit(X)
+
     X = scaler.transform(X)
 
     model1.partial_fit(X, y, classes=[0,1])
@@ -72,7 +72,7 @@ def train(df):
 
     model_ready = True
 
-# ================= ENSEMBLE =================
+# ================= PREDICT =================
 def predict(df):
     if not model_ready:
         return "HOLD", 0.5
@@ -92,18 +92,50 @@ def predict(df):
     else:
         return "HOLD", p
 
-# ================= TRADE =================
-def trade(signal):
-    global balance
+# ================= SIMULATION =================
+def simulate(signal):
+    global balance, wins, losses
+
+    old_balance = balance
 
     if signal == "BUY":
         balance *= 1.01
     elif signal == "SELL":
         balance *= 0.99
 
+    if balance > old_balance:
+        wins += 1
+    else:
+        losses += 1
+
     equity.append(round(balance,2))
     if len(equity) > 50:
         equity.pop(0)
+
+# ================= COOLDOWN =================
+def cooldown(pair, signal, minutes=15):
+    key = (pair, signal)
+    now = time.time()
+
+    if key in last_sent and (now - last_sent[key]) < (minutes * 60):
+        return False
+
+    last_sent[key] = now
+    return True
+
+# ================= LOG =================
+def log_trade(pair, signal, prob, price, balance):
+    row = pd.DataFrame([{
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "pair": pair,
+        "signal": signal,
+        "prob": round(prob, 4),
+        "price": round(price, 4),
+        "balance": round(balance, 2)
+    }])
+
+    header = not os.path.exists(TRADE_LOG)
+    row.to_csv(TRADE_LOG, mode="a", header=header, index=False)
 
 # ================= SAVE =================
 def save_model():
@@ -119,6 +151,8 @@ def load_model():
 def run():
     load_model()
 
+    last_report = datetime.now().day
+
     while True:
         for pair in PAIRS:
             try:
@@ -127,14 +161,14 @@ def run():
 
                 train(df)
                 signal, prob = predict(df)
-
                 price = df["close"].iloc[-1]
 
-                if signal != "HOLD":
-                    trade(signal)
+                if signal != "HOLD" and prob > 0.65 and cooldown(pair, signal):
+                    simulate(signal)
+                    log_trade(pair, signal, prob, price, balance)
 
                     send_telegram(
-                        f"{signal} {pair} @ {round(price,4)} | prob:{round(prob,2)}"
+                        f"📊 {pair}\n📈 {signal}\n💰 {round(price,4)}\n🧠 {round(prob,2)}\n💼 Balance: {round(balance,2)}"
                     )
 
                 signals.append({
@@ -149,41 +183,54 @@ def run():
             except Exception as e:
                 print("Error:", e)
 
-        save_model()
-        time.sleep(90)   # 🔥 optimized for 512MB
+        # daily summary
+        today = datetime.now().day
+        if today != last_report:
+            total = wins + losses
+            winrate = round((wins/total)*100,2) if total > 0 else 0
 
-# ================= CHART =================
+            send_telegram(
+                f"📊 DAILY REPORT\n💰 Balance: {round(balance,2)}\n📈 Winrate: {winrate}%"
+            )
+
+            last_report = today
+
+        save_model()
+        time.sleep(120)
+
+# ================= ROUTES =================
+@app.route("/")
+def home():
+    total = wins + losses
+    winrate = round((wins/total)*100,2) if total > 0 else 0
+
+    return f"""
+    <h1>🤖 AI Bot PRO</h1>
+    <p>Balance: {balance}</p>
+    <p>Winrate: {winrate}%</p>
+    <p><a href='/chart'>📊 Chart</a></p>
+    <p><a href='/logs'>🧾 Logs</a></p>
+    """
+
+@app.route("/logs")
+def logs():
+    if not os.path.exists(TRADE_LOG):
+        return "No logs yet"
+    df = pd.read_csv(TRADE_LOG)
+    return df.tail(20).to_html()
+
 @app.route("/chart")
 def chart():
     if not equity:
         return "No data yet"
 
-    plt.figure()
+    plt.figure(figsize=(8,4))
     plt.plot(equity)
     plt.title("Equity Curve")
     plt.savefig("chart.png")
     plt.close()
 
     return send_file("chart.png", mimetype="image/png")
-
-# ================= UI =================
-HTML = """
-<h1>🤖 AI Trading Bot</h1>
-
-<h2>Signals</h2>
-{% for s in signals %}
-<p>{{s.signal}} - {{s.pair}} @ {{s.price}}</p>
-{% endfor %}
-
-<h2>Balance</h2>
-<p>{{balance}}</p>
-
-<h2><a href="/chart">📊 View Equity Chart</a></h2>
-"""
-
-@app.route("/")
-def home():
-    return render_template_string(HTML, signals=signals, balance=balance)
 
 # ================= RUN =================
 if __name__ == "__main__":
