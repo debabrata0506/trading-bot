@@ -1,103 +1,120 @@
 from flask import Flask, render_template_string
-import threading
-import requests
-import pandas as pd
-import time
-import os
+import requests, pandas as pd, time, os
+from sklearn.linear_model import SGDClassifier
+from sklearn.preprocessing import StandardScaler
+import joblib
 
 app = Flask(__name__)
 
+PAIRS = ["B-DOGE_USDT","B-MATIC_USDT","B-SHIB_USDT"]
+
+model = SGDClassifier(loss="log_loss")
+scaler = StandardScaler()
+
 signals = []
-stats = {"wins": 0, "losses": 0}
+equity = []
+balance = 1000
 
-PAIRS = ["B-DOGE_USDT", "B-MATIC_USDT", "B-SHIB_USDT"]
+# ================= DATA =================
+def get_data(pair):
+    url = "https://public.coindcx.com/market_data/candles"
+    params = {"pair": pair, "interval":"5m","limit":100}
+    df = pd.DataFrame(requests.get(url, params=params).json())
+    df.columns = [c.lower() for c in df.columns]
+    df["close"] = pd.to_numeric(df["close"])
+    return df
 
-# ================= FETCH DATA =================
-def get_price(pair):
-    try:
-        url = "https://public.coindcx.com/market_data/candles"
-        params = {"pair": pair, "interval": "5m", "limit": 50}
-        data = requests.get(url, params=params).json()
+# ================= FEATURE =================
+def features(df):
+    df["ret"] = df["close"].pct_change()
+    df["ema"] = df["close"].ewm(span=10).mean()
+    df["y"] = (df["close"].shift(-1) > df["close"]).astype(int)
+    df.dropna(inplace=True)
+    return df
 
-        df = pd.DataFrame(data)
-        df.columns = [c.lower() for c in df.columns]
-        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+# ================= TRAIN =================
+def train(df):
+    X = df[["ret","ema"]]
+    y = df["y"]
+    scaler.fit(X)
+    X = scaler.transform(X)
+    model.partial_fit(X,y,classes=[0,1])
 
-        return df["close"].iloc[-1]
-    except:
-        return None
+# ================= SIGNAL =================
+def predict(df):
+    X = df[["ret","ema"]].iloc[-1:]
+    X = scaler.transform(X)
+    p = model.predict_proba(X)[0][1]
+
+    if p > 0.6:
+        return "BUY", p
+    elif p < 0.4:
+        return "SELL", p
+    else:
+        return "HOLD", p
+
+# ================= TRADE =================
+def trade(signal, price):
+    global balance
+    if signal == "BUY":
+        balance *= 1.01
+    elif signal == "SELL":
+        balance *= 0.99
+
+    equity.append(balance)
+    if len(equity) > 50:
+        equity.pop(0)
 
 # ================= BOT =================
-def bot_loop():
+def run():
     while True:
         for pair in PAIRS:
             try:
-                price = get_price(pair)
+                df = get_data(pair)
+                df = features(df)
+                train(df)
 
-                if price is None:
-                    continue
+                signal, prob = predict(df)
+                price = df["close"].iloc[-1]
 
-                # simple demo logic
-                signal = "BUY" if price % 2 == 0 else "SELL"
+                if signal != "HOLD":
+                    trade(signal, price)
 
                 signals.append({
-                    "pair": pair,
-                    "signal": signal,
-                    "price": round(price, 6),
-                    "time": time.strftime("%H:%M:%S")
+                    "pair":pair,
+                    "signal":signal,
+                    "price":round(price,4)
                 })
 
-                if len(signals) > 10:
+                if len(signals)>10:
                     signals.pop(0)
 
-            except Exception as e:
-                print("Error:", e)
+            except:
+                pass
 
         time.sleep(60)
 
 # ================= UI =================
 HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<title>Trading Dashboard</title>
-<meta http-equiv="refresh" content="5">
-<style>
-body { font-family: Arial; background: #0f172a; color: white; text-align:center; }
-.card { background:#1e293b; padding:15px; margin:10px; border-radius:10px; }
-.buy { color: #22c55e; }
-.sell { color: #ef4444; }
-</style>
-</head>
-<body>
+<h1>🤖 AI Trading Bot</h1>
 
-<h1>🚀 Live Trading Dashboard</h1>
-
-<div class="card">
-<h2>📊 Signals</h2>
+<h2>Signals</h2>
 {% for s in signals %}
-<p class="{{'buy' if s.signal=='BUY' else 'sell'}}">
-{{s.signal}} - {{s.pair}} @ {{s.price}} ({{s.time}})
-</p>
+<p>{{s.signal}} - {{s.pair}} @ {{s.price}}</p>
 {% endfor %}
-</div>
 
-<div class="card">
-<h2>📈 Stats</h2>
-<p>Wins: {{stats.wins}}</p>
-<p>Losses: {{stats.losses}}</p>
-</div>
+<h2>Balance</h2>
+<p>{{balance}}</p>
 
-</body>
-</html>
+<h2>Equity</h2>
+<p>{{equity}}</p>
 """
 
 @app.route("/")
 def home():
-    return render_template_string(HTML, signals=signals, stats=stats)
+    return render_template_string(HTML, signals=signals, balance=balance, equity=equity)
 
-# ================= RUN =================
-if __name__ == "__main__":
-    threading.Thread(target=bot_loop, daemon=True).start()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+import threading
+threading.Thread(target=run).start()
+
+app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)))
